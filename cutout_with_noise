@@ -1,0 +1,220 @@
+import healpy as hp
+import numpy as np
+import matplotlib.pyplot as plt
+from astropy.io import fits
+%matplotlib inline
+import os
+import montage_wrapper as montage
+
+
+def get_the_pixels(nside):
+
+    ## Find which heal-pixels your intended region includes.
+    ## Then, apply a perterbation to those
+    ## This part doesn't have to be exact -- unless you really want to minimize the time it takes to 
+    ## get and perturb the pixels.
+    ## Basically, we just need to define a cicle that encloses the region we want to extract.
+    ## We'll use query_disc as we did with the HAPERFLUX code translation.
+
+    lon = 196.00
+    lat = -12.00
+
+    phi   = lon*np.pi/180.
+    theta = np.pi/2.-lat*np.pi/180.
+    vec0 = hp.ang2vec(theta, phi)
+    nside = nside
+    radius = 15.0*np.pi/180.
+
+    hpixels = hp.query_disc(nside, vec0, radius, inclusive = True, fact = 4, nest = False)
+    
+    return hpixels
+    
+    # Now that you know which pixels you have to include, you can apply the perterbation to only these pixels [rather than the whole map]
+    # Unlike the "tile-based" approach, with the IRC-data, now we use
+
+    
+def perturb_the_map(data_map, sigma_map, hpixels):
+    
+    img_random         = np.random.normal(loc=0.0, scale = 1.0, size = len(hpixels))
+
+    #plt.hist(img_random)
+    
+    noisy_array        = data_map[hpixels] + sigma_map[hpixels]*img_random
+    
+    data_map[hpixels]  = noisy_array
+
+    return data_map
+
+        
+    ## Then, use gnomdrizz (or something like that!) to make the cut-out image.
+    ## We'll want to use the exact-same-header that we used for the AKARI IRC processing!!
+        
+def make_the_cutout(input_array, final_out_dir, input_coordsys = 'GALACTIC', band = 'WideL'):
+    
+    from reproject import reproject_from_healpix
+    
+    ## Here we open the template image. We don't need the data actually, just the header. 
+    ## The data part of the hdu will be overwritten later, with our cutout array.
+    print "Getting template HDU"
+    template_hdu = fits.open("/work1/users/aaronb/Databrary/Orionis_test/MC_test/out_unperturbed/mosaic.fits")
+    #input_hdu = fits.open("/work1/users/aaronb/Databrary/HEALPix/AKARI_HEALPix_orig/4096_nside/akari_140_4096.fits")
+    
+    
+    ## Now we get the actual cutout, according to the template header:
+    print "Making the cutout"
+    cutout, footprint = \
+     reproject_from_healpix((input_array,input_coordsys), 
+                                     template_hdu[0].header, 
+                                     shape_out=None, 
+                                     hdu_in=None, 
+                                     order='bilinear', 
+                                     nested=False)
+    
+    print "Writing the unsmoothed cutout"
+    ## We'll writeout this intermediate image, so that we know if anything went wrong thus far.
+    cutout_out_name = final_out_dir + "cutout_"+band+".fits"
+    
+    template_hdu[0].data = cutout
+    template_hdu.writeto(cutout_out_name, clobber=True)
+    
+    
+    ## Import convolution modules
+    from astropy.convolution import convolve, convolve_fft, Gaussian2DKernel
+
+
+    ## Import the Colonel
+    FWHM = 4.4 #in pixels. Up to this point, the input res should be something like 0.22deg/pixel.
+    kernel = Gaussian2DKernel(stddev=FWHM)
+    
+
+    # Smoothing:
+    print "Doing the smoothing"
+    template_hdu[0].data = convolve_fft(template_hdu[0].data, kernel, boundary='periodic')
+
+
+    #os.system('rm -r '+final_out_dir)
+    #os.system('mkdir '+final_out_dir)
+    
+    smooth_out_name = final_out_dir + "smoothed_"+band+".fits"
+    
+    template_hdu[0].writeto(smooth_out_name, clobber=True)
+    
+    # Regridding and trimming:
+    
+    regrid_out_name = final_out_dir + "regridded_"+band+".fits"
+    trimmed_out_name = final_out_dir + "trimmed_"+band+".fits"
+        
+    montage.commands.mSubimage(smooth_out_name, trimmed_out_name, 84.25, 9.11, 10.0)
+    # the next step rebings the image to ~0.5deg/pixel
+    montage.commands.mShrink(trimmed_out_name, regrid_out_name, factor=10, fixed_size=True) 
+    # now that the image is at the desired scale and PSF, we trim off the edges:
+    
+
+    #return template
+
+
+def do_the_hp_mc(data_array, sigma_array, iterations=1, smooth=True, degrade=True, nside=4096, band='WideL'):
+
+    #test_array = np.empty([len(hpixels),iterations 
+    print "Getting HEALPixels in your region"
+    hpixels = get_the_pixels(nside=nside)
+    
+    
+    print "Reading in the raw data"
+    
+    # First, make an "unperturbed" cutout. It will have the same processing
+    # conditions as the MC frames, but it won't have any noise added:
+    
+    reference_img_dir = "/work1/users/aaronb/Databrary/Orionis_test/MC_test_HEALPix/reference/"
+    make_the_cutout(data_array, reference_img_dir, input_coordsys = 'GALACTIC')
+    
+    mc_cube = []
+
+    for i in range(0,iterations):
+    
+        noisy_map = perturb_the_map(data_map, sigma_map, hpixels)
+    
+        #test_array[:,i] = noisy_map[hpixels]
+    
+        #test_array = np.array(test_array)
+    
+        print "Iteration # "+str(i)
+    
+        final_out_dir = "/work1/users/aaronb/Databrary/Orionis_test/MC_test_HEALPix/iteration_"+str(i)
+        #os.system('rmdir '+final_out_dir)
+        #os.system('rm -r '+final_out_dir)
+        #os.system('mkdir '+final_out_dir)
+        #temp_map = "/work1/users/aaronb/Databrary/Orionis_test/MC_test_HEALPix/hp_temp_iteration_"+str(i)+".fits"
+
+        #hp.write_map(temp_map, data_map[hpixels], partial=True, coord = 'G')
+        
+        noisy_map[noisy_map==hp.UNSEEN] = np.nan
+        
+        make_the_cutout(noisy_map, final_out_dir)
+
+        mc_frame = fits.open(final_out_dir+"regridded_"+band+".fits")
+        
+        mc_cube.append(mc_frame[0].data)
+
+    np.array(mc_cube)
+    
+    mc_std = np.nanstd(mc_cube, axis=0)
+        
+    mc_frame[0].data = mc_std
+    
+            
+    std_out_dir = "/work1/users/aaronb/Databrary/Orionis_test/MC_test_HEALPix/reference_"+band+".sigma.fits"
+    mc_frame.writeto(std_out_dir, clobber=True)
+        
+    return mc_cube
+
+
+def fits_display_test(image_file):
+    
+    import aplpy
+    import atpy
+    
+    # Create a new figure
+    fig = aplpy.FITSFigure(image_file)
+
+    # Show the colorscale
+    fig.show_colorscale()
+
+    # Add contours
+    #fig.show_contour(image_file, cmap='jet', levels=np.linspace(0.0, 1.0, 10))
+
+    # Make ticks white
+    fig.ticks.set_color('white')
+
+    # Make labels smaller
+    fig.tick_labels.set_font(size='small')
+
+    # Overlay a grid
+    fig.add_grid()
+    fig.grid.set_alpha(0.5)
+
+    # Add a colorbar
+    fig.add_colorbar()
+    
+    plt.show()
+    plt.close()
+
+def check_guassianity(noisy_cube,xpix,ypix):
+    
+    from scipy import stats
+    
+    print noisy_cube.shape
+    
+    #fig = plt.imshow(noisy_cube[0,:,:])
+    #its_display_test(noisy_cube)
+    plt.show()
+    plt.close()
+    
+    noisy_pixel = noisy_cube[:,xpix,ypix]
+    
+    noisy_pixel = np.delete(noisy_pixel, noisy_pixel[noisy_pixel!=np.nan])
+    
+    plt.hist(noisy_cube[:,xpix,ypix])
+    
+    print np.nanstd(noisy_cube[:,xpix,ypix])
+        
